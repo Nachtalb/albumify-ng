@@ -6,7 +6,7 @@ use teloxide::types::{MediaKind, MessageKind};
 use teloxide::utils::command::BotCommands;
 
 use crate::ack::AckDebouncer;
-use crate::album::build_groups;
+use crate::album::{plan_groups, resolve_group};
 use crate::commands::Command;
 use crate::state::{MediaStore, PendingMedia};
 
@@ -107,11 +107,26 @@ async fn create(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
     }
 
     let total = items.len();
-    let groups = build_groups(items);
+    let groups = plan_groups(items);
     let group_count = groups.len();
 
     for (i, group) in groups.into_iter().enumerate() {
-        if let Err(err) = bot.send_media_group(msg.chat.id, group).await {
+        // Resolve animation file_ids to URLs (animations can't be referenced
+        // as InputMediaVideo by file_id). Done per-group so a failure on one
+        // group can still report a sensible index to the user.
+        let resolved = match resolve_group(bot, group).await {
+            Ok(g) => g,
+            Err(err) => {
+                tracing::warn!(?err, group_index = i, "failed to resolve media group");
+                bot.send_message(
+                    msg.chat.id,
+                    format!("Failed to prepare album {}/{group_count}: {err}", i + 1),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if let Err(err) = bot.send_media_group(msg.chat.id, resolved).await {
             tracing::warn!(?err, group_index = i, "send_media_group failed");
             bot.send_message(
                 msg.chat.id,

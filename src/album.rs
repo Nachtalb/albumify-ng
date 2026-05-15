@@ -1,12 +1,24 @@
 //! Group a flat list of pending media into Telegram-compatible albums.
 //!
-//! Telegram's `sendMediaGroup` allows mixing Photo + Video in one album, but
-//! Document and Animation each need their own homogeneous group. We preserve
-//! the user's insertion order and start a new group whenever the next item
-//! cannot legally join the current one.
+//! Telegram's `sendMediaGroup` accepts photos, videos and documents (plus
+//! audio / livephoto, which we don't queue). Documents must travel alone
+//! with other documents; photos and videos can share a single album. We
+//! preserve the user's insertion order and start a new group whenever the
+//! next item cannot legally join the current one, and we cap each group at
+//! Telegram's 10-item limit.
+//!
+//! Animations are a special case. `sendMediaGroup` does **not** accept
+//! `InputMediaAnimation`, and the file_id Telegram hands us when an animation
+//! is received is type-bound — referencing it as a video yields
+//! `"Wrong file identifier/HTTP URL specified"`. To send animations inside
+//! an album we resolve them to a temporary file URL via `getFile` and pass
+//! that URL to `InputMediaVideo`. Telegram re-fetches it from its own CDN
+//! as if it were a fresh upload.
 
+use anyhow::Result;
+use teloxide::prelude::*;
 use teloxide::types::{
-    InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
+    FileId, InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
 };
 
 use crate::state::PendingMedia;
@@ -30,35 +42,15 @@ fn classify(item: &PendingMedia) -> Kind {
     }
 }
 
-fn to_input_media(item: PendingMedia) -> InputMedia {
-    match item {
-        PendingMedia::Photo(id) => {
-            InputMedia::Photo(InputMediaPhoto::new(InputFile::file_id(id.into())))
-        }
-        PendingMedia::Video(id) => {
-            InputMedia::Video(InputMediaVideo::new(InputFile::file_id(id.into())))
-        }
-        PendingMedia::Document(id) => {
-            InputMedia::Document(InputMediaDocument::new(InputFile::file_id(id.into())))
-        }
-        // Telegram's sendMediaGroup does NOT accept InputMediaAnimation.
-        // The Bot API only allows audio, document, livephoto, photo, video.
-        // Animations are silent MP4s with the same underlying file as a video,
-        // so we re-package them as InputMediaVideo. Telegram resolves the
-        // file_id server-side and the result plays the same way.
-        PendingMedia::Animation(id) => {
-            InputMedia::Video(InputMediaVideo::new(InputFile::file_id(id.into())))
-        }
-    }
-}
-
-/// Split the buffer into a sequence of compatible groups, capped at 10 items
-/// per group (Telegram's limit).
+/// Pure planner: split a flat buffer into Telegram-compatible groups, capped
+/// at 10 items per group.
 ///
-/// Each output `Vec<InputMedia>` is a single `sendMediaGroup` call.
-pub fn build_groups(items: Vec<PendingMedia>) -> Vec<Vec<InputMedia>> {
+/// Returns the items themselves (not `InputMedia`) so the planner stays sync
+/// and unit-testable. The async conversion to `InputMedia` happens in
+/// [`resolve_group`].
+pub fn plan_groups(items: Vec<PendingMedia>) -> Vec<Vec<PendingMedia>> {
     const MAX_GROUP: usize = 10;
-    let mut groups: Vec<Vec<InputMedia>> = Vec::new();
+    let mut groups: Vec<Vec<PendingMedia>> = Vec::new();
     let mut current_kind: Option<Kind> = None;
 
     for item in items {
@@ -73,33 +65,70 @@ pub fn build_groups(items: Vec<PendingMedia>) -> Vec<Vec<InputMedia>> {
             current_kind = Some(kind);
         }
 
-        groups
-            .last_mut()
-            .expect("just pushed")
-            .push(to_input_media(item));
+        groups.last_mut().expect("just pushed").push(item);
     }
 
     groups
+}
+
+/// Convert one planned group into the `Vec<InputMedia>` that `sendMediaGroup`
+/// expects.
+///
+/// Photos, videos and documents reuse their original `file_id`. Animations
+/// are resolved via `getFile` to a temporary URL because their file_ids
+/// cannot be referenced as `InputMediaVideo`.
+pub async fn resolve_group(bot: &Bot, items: Vec<PendingMedia>) -> Result<Vec<InputMedia>> {
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        out.push(resolve_item(bot, item).await?);
+    }
+    Ok(out)
+}
+
+async fn resolve_item(bot: &Bot, item: PendingMedia) -> Result<InputMedia> {
+    Ok(match item {
+        PendingMedia::Photo(id) => {
+            InputMedia::Photo(InputMediaPhoto::new(InputFile::file_id(id.into())))
+        }
+        PendingMedia::Video(id) => {
+            InputMedia::Video(InputMediaVideo::new(InputFile::file_id(id.into())))
+        }
+        PendingMedia::Document(id) => {
+            InputMedia::Document(InputMediaDocument::new(InputFile::file_id(id.into())))
+        }
+        PendingMedia::Animation(id) => {
+            // Animation file_ids are type-bound and not reusable as a video.
+            // getFile returns a file path; combined with the bot token it
+            // yields a temporary URL Telegram is willing to re-ingest as
+            // a video in sendMediaGroup. The URL is valid for at least an
+            // hour, more than enough for the immediate send below.
+            let file = bot.get_file(FileId(id.clone())).await?;
+            let url_str = format!(
+                "https://api.telegram.org/file/bot{}/{}",
+                bot.token(),
+                file.path
+            );
+            let url = url::Url::parse(&url_str)
+                .map_err(|e| anyhow::anyhow!("invalid file URL for animation {id}: {e}"))?;
+            InputMedia::Video(InputMediaVideo::new(InputFile::url(url)))
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn kinds(groups: &[Vec<InputMedia>]) -> Vec<Vec<&'static str>> {
+    fn kinds(groups: &[Vec<PendingMedia>]) -> Vec<Vec<&'static str>> {
         groups
             .iter()
             .map(|g| {
                 g.iter()
                     .map(|m| match m {
-                        InputMedia::Photo(_) => "photo",
-                        InputMedia::Video(_) => "video",
-                        InputMedia::Document(_) => "doc",
-                        // Animations are re-packaged as Video before reaching
-                        // InputMedia, so this arm should be unreachable in
-                        // tests; keep it for completeness.
-                        InputMedia::Animation(_) => "anim",
-                        InputMedia::Audio(_) => "audio",
+                        PendingMedia::Photo(_) => "photo",
+                        PendingMedia::Video(_) => "video",
+                        PendingMedia::Document(_) => "doc",
+                        PendingMedia::Animation(_) => "anim",
                     })
                     .collect()
             })
@@ -110,7 +139,9 @@ mod tests {
     fn example_from_spec_splits_around_documents() {
         // image, image, document, document, video, animation
         //   -> (image, image)(document, document)(video, animation)
-        // Only documents are exclusive; photo/video/animation all share.
+        // Only documents are exclusive; photo/video/animation all share
+        // at the planning layer (animation is resolved to a video URL at
+        // send time, see resolve_item).
         let input = vec![
             PendingMedia::Photo("p1".into()),
             PendingMedia::Photo("p2".into()),
@@ -120,13 +151,13 @@ mod tests {
             PendingMedia::Animation("a1".into()),
         ];
 
-        let groups = build_groups(input);
+        let groups = plan_groups(input);
         assert_eq!(
             kinds(&groups),
             vec![
                 vec!["photo", "photo"],
                 vec!["doc", "doc"],
-                vec!["video", "video"],
+                vec!["video", "anim"],
             ]
         );
     }
@@ -139,7 +170,7 @@ mod tests {
             PendingMedia::Animation("a1".into()),
             PendingMedia::Photo("p2".into()),
         ];
-        let groups = build_groups(input);
+        let groups = plan_groups(input);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].len(), 4);
     }
@@ -149,7 +180,7 @@ mod tests {
         let input: Vec<_> = (0..23)
             .map(|i| PendingMedia::Photo(format!("p{i}")))
             .collect();
-        let groups = build_groups(input);
+        let groups = plan_groups(input);
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].len(), 10);
         assert_eq!(groups[1].len(), 10);
@@ -158,7 +189,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_no_groups() {
-        assert!(build_groups(vec![]).is_empty());
+        assert!(plan_groups(vec![]).is_empty());
     }
 
     #[test]
@@ -168,7 +199,7 @@ mod tests {
             PendingMedia::Photo("p1".into()),
             PendingMedia::Document("d2".into()),
         ];
-        let groups = build_groups(input);
+        let groups = plan_groups(input);
         assert_eq!(
             kinds(&groups),
             vec![vec!["doc"], vec!["photo"], vec!["doc"]]
