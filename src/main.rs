@@ -1,5 +1,6 @@
 //! Albumify NG — Telegram bot that bundles forwarded media into albums.
 
+mod ack;
 mod album;
 mod commands;
 mod handlers;
@@ -10,6 +11,7 @@ use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
 use teloxide::types::ChatKind;
 
+use crate::ack::AckDebouncer;
 use crate::commands::{Command, publish_bot_metadata};
 use crate::handlers::{handle_command, handle_media};
 use crate::state::MediaStore;
@@ -37,6 +39,7 @@ async fn main() -> Result<()> {
     }
 
     let store = MediaStore::new();
+    let ack = AckDebouncer::new();
 
     // Reject group/channel messages early — Albumify NG is a private-chat bot.
     let private_only = dptree::filter(|msg: Message| matches!(msg.chat.kind, ChatKind::Private(_)));
@@ -55,7 +58,7 @@ async fn main() -> Result<()> {
     tracing::info!("starting long-polling dispatcher");
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![store])
+        .dependencies(dptree::deps![store, ack])
         .default_handler(|_| async {})
         .error_handler(LoggingErrorHandler::with_custom_text(
             "an error in the update handler",

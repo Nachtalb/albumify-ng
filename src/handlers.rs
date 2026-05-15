@@ -5,18 +5,25 @@ use teloxide::prelude::*;
 use teloxide::types::{MediaKind, MessageKind};
 use teloxide::utils::command::BotCommands;
 
+use crate::ack::AckDebouncer;
 use crate::album::build_groups;
 use crate::commands::Command;
 use crate::state::{MediaStore, PendingMedia};
 
 /// Dispatch a parsed command to the right handler.
-pub async fn handle_command(bot: Bot, msg: Message, cmd: Command, store: MediaStore) -> Result<()> {
+pub async fn handle_command(
+    bot: Bot,
+    msg: Message,
+    cmd: Command,
+    store: MediaStore,
+    ack: AckDebouncer,
+) -> Result<()> {
     match cmd {
         Command::Help => help(&bot, &msg).await,
-        Command::Start => start(&bot, &msg, &store).await,
-        Command::Status => status(&bot, &msg, &store).await,
-        Command::Cancel => cancel(&bot, &msg, &store).await,
-        Command::Create => create(&bot, &msg, &store).await,
+        Command::Start => start(&bot, &msg, &store, &ack).await,
+        Command::Status => status(&bot, &msg, &store, &ack).await,
+        Command::Cancel => cancel(&bot, &msg, &store, &ack).await,
+        Command::Create => create(&bot, &msg, &store, &ack).await,
     }
 }
 
@@ -26,8 +33,11 @@ async fn help(bot: &Bot, msg: &Message) -> Result<()> {
     Ok(())
 }
 
-async fn start(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
+async fn start(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer) -> Result<()> {
     if let Some(user) = msg.from.as_ref() {
+        // Throw away any pending debounced ack — /start is itself a status
+        // message, no need to follow it with "Queued 0 items".
+        ack.cancel(user.id).await;
         let prior = store.clear(user.id).await;
         let extra = if prior > 0 {
             format!(" (discarded {prior} item(s) from a previous session)")
@@ -47,10 +57,11 @@ async fn start(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
     Ok(())
 }
 
-async fn status(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
+async fn status(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer) -> Result<()> {
     let Some(user) = msg.from.as_ref() else {
         return Ok(());
     };
+    ack.cancel(user.id).await;
     let n = store.len(user.id).await;
     let text = if n == 0 {
         "Queue is empty. Send me some media first.".to_string()
@@ -61,10 +72,11 @@ async fn status(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
     Ok(())
 }
 
-async fn cancel(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
+async fn cancel(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer) -> Result<()> {
     let Some(user) = msg.from.as_ref() else {
         return Ok(());
     };
+    ack.cancel(user.id).await;
     let removed = store.clear(user.id).await;
     let text = if removed == 0 {
         "Nothing to cancel — queue was already empty.".to_string()
@@ -75,10 +87,12 @@ async fn cancel(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
     Ok(())
 }
 
-async fn create(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
+async fn create(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer) -> Result<()> {
     let Some(user) = msg.from.as_ref() else {
         return Ok(());
     };
+    // Drop any pending debounced ack — /create supersedes it.
+    ack.cancel(user.id).await;
 
     // `take` drains the buffer — even if sending fails, we don't leak state.
     // Users can simply re-forward the items and try again.
@@ -120,7 +134,15 @@ async fn create(bot: &Bot, msg: &Message, store: &MediaStore) -> Result<()> {
 ///
 /// Photos arrive as a `Vec<PhotoSize>` — Telegram's resolution ladder; we
 /// take the largest by `file_size` (falling back to the last entry).
-pub async fn handle_media(bot: Bot, msg: Message, store: MediaStore) -> Result<()> {
+///
+/// The user-visible ack is debounced (`AckDebouncer`) so a rapid burst of
+/// uploads collapses into one summary message instead of N spammy replies.
+pub async fn handle_media(
+    bot: Bot,
+    msg: Message,
+    store: MediaStore,
+    ack: AckDebouncer,
+) -> Result<()> {
     let Some(user) = msg.from.as_ref() else {
         return Ok(());
     };
@@ -142,20 +164,20 @@ pub async fn handle_media(bot: Bot, msg: Message, store: MediaStore) -> Result<(
                     store
                         .push(user_id, PendingMedia::Photo(size.file.id.0.clone()))
                         .await;
-                    Some("photo")
+                    true
                 }
-                None => None,
+                None => false,
             }
         }
         MediaKind::Video(v) => {
             store
                 .push(user_id, PendingMedia::Video(v.video.file.id.0.clone()))
                 .await;
-            Some("video")
+            true
         }
-        // Animations (GIFs/MP4-without-sound) arrive as their own MediaKind and
-        // ALSO populate the document field. Match Animation first so we
-        // classify them correctly.
+        // Animations (GIFs / silent MP4s) arrive as their own MediaKind and
+        // also populate the document field. Match Animation first so they
+        // don't fall through to the Document arm.
         MediaKind::Animation(a) => {
             store
                 .push(
@@ -163,7 +185,7 @@ pub async fn handle_media(bot: Bot, msg: Message, store: MediaStore) -> Result<(
                     PendingMedia::Animation(a.animation.file.id.0.clone()),
                 )
                 .await;
-            Some("animation")
+            true
         }
         MediaKind::Document(d) => {
             store
@@ -172,20 +194,13 @@ pub async fn handle_media(bot: Bot, msg: Message, store: MediaStore) -> Result<(
                     PendingMedia::Document(d.document.file.id.0.clone()),
                 )
                 .await;
-            Some("document")
+            true
         }
-        _ => None,
+        _ => false,
     };
 
-    if let Some(kind) = queued {
-        let count = store.len(user_id).await;
-        // Quiet ack — long enough to confirm receipt, short enough not to spam.
-        let _ = bot
-            .send_message(
-                msg.chat.id,
-                format!("Queued {kind} ({count} total). /create when ready."),
-            )
-            .await;
+    if queued {
+        ack.schedule(bot, msg.chat.id, user_id, store).await;
     }
 
     Ok(())

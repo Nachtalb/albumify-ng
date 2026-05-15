@@ -6,8 +6,7 @@
 //! cannot legally join the current one.
 
 use teloxide::types::{
-    InputFile, InputMedia, InputMediaAnimation, InputMediaDocument, InputMediaPhoto,
-    InputMediaVideo,
+    InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
 };
 
 use crate::state::PendingMedia;
@@ -42,8 +41,13 @@ fn to_input_media(item: PendingMedia) -> InputMedia {
         PendingMedia::Document(id) => {
             InputMedia::Document(InputMediaDocument::new(InputFile::file_id(id.into())))
         }
+        // Telegram's sendMediaGroup does NOT accept InputMediaAnimation.
+        // The Bot API only allows audio, document, livephoto, photo, video.
+        // Animations are silent MP4s with the same underlying file as a video,
+        // so we re-package them as InputMediaVideo. Telegram resolves the
+        // file_id server-side and the result plays the same way.
         PendingMedia::Animation(id) => {
-            InputMedia::Animation(InputMediaAnimation::new(InputFile::file_id(id.into())))
+            InputMedia::Video(InputMediaVideo::new(InputFile::file_id(id.into())))
         }
     }
 }
@@ -91,6 +95,9 @@ mod tests {
                         InputMedia::Photo(_) => "photo",
                         InputMedia::Video(_) => "video",
                         InputMedia::Document(_) => "doc",
+                        // Animations are re-packaged as Video before reaching
+                        // InputMedia, so this arm should be unreachable in
+                        // tests; keep it for completeness.
                         InputMedia::Animation(_) => "anim",
                         InputMedia::Audio(_) => "audio",
                     })
@@ -119,7 +126,7 @@ mod tests {
             vec![
                 vec!["photo", "photo"],
                 vec!["doc", "doc"],
-                vec!["video", "anim"],
+                vec!["video", "video"],
             ]
         );
     }
