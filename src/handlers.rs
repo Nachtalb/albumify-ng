@@ -2,13 +2,28 @@
 
 use anyhow::Result;
 use teloxide::prelude::*;
-use teloxide::types::{MediaKind, MessageKind};
+use teloxide::types::{
+    KeyboardButton, KeyboardMarkup, MediaKind, MessageKind, ReplyMarkup,
+};
 use teloxide::utils::command::BotCommands;
 
 use crate::ack::AckDebouncer;
 use crate::album::{plan_groups, resolve_group};
 use crate::commands::Command;
 use crate::state::{MediaStore, PendingMedia};
+
+/// Persistent reply keyboard with the two main actions. Sent alongside every
+/// status/text message so the user can tap instead of typing the slash
+/// commands.
+fn main_keyboard() -> ReplyMarkup {
+    let kb = KeyboardMarkup::new(vec![vec![
+        KeyboardButton::new("/start"),
+        KeyboardButton::new("/create"),
+    ]])
+    .resize_keyboard()
+    .persistent();
+    ReplyMarkup::Keyboard(kb)
+}
 
 /// Dispatch a parsed command to the right handler.
 pub async fn handle_command(
@@ -29,6 +44,7 @@ pub async fn handle_command(
 
 async fn help(bot: &Bot, msg: &Message) -> Result<()> {
     bot.send_message(msg.chat.id, Command::descriptions().to_string())
+        .reply_markup(main_keyboard())
         .await?;
     Ok(())
 }
@@ -52,6 +68,7 @@ async fn start(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer)
                  /status to peek at the queue, /cancel to throw it all out."
             ),
         )
+        .reply_markup(main_keyboard())
         .await?;
     }
     Ok(())
@@ -68,7 +85,9 @@ async fn status(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
     } else {
         format!("{n} item(s) queued. Send /create to bundle them.")
     };
-    bot.send_message(msg.chat.id, text).await?;
+    bot.send_message(msg.chat.id, text)
+        .reply_markup(main_keyboard())
+        .await?;
     Ok(())
 }
 
@@ -83,7 +102,9 @@ async fn cancel(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
     } else {
         format!("Discarded {removed} item(s). Send /start to begin again.")
     };
-    bot.send_message(msg.chat.id, text).await?;
+    bot.send_message(msg.chat.id, text)
+        .reply_markup(main_keyboard())
+        .await?;
     Ok(())
 }
 
@@ -102,6 +123,7 @@ async fn create(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
             msg.chat.id,
             "Nothing queued. Send some media first, then /create.",
         )
+        .reply_markup(main_keyboard())
         .await?;
         return Ok(());
     }
@@ -127,6 +149,7 @@ async fn create(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
         msg.chat.id,
         format!("Sent {total} item(s) in {group_count} album(s). Send /start for another."),
     )
+    .reply_markup(main_keyboard())
     .await?;
     Ok(())
 }
