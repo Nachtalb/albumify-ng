@@ -11,11 +11,12 @@
 //! `InputMediaAnimation`, and the file_id Telegram hands us when an animation
 //! is received is type-bound — referencing it as a video yields
 //! `"Wrong file identifier/HTTP URL specified"`. To send animations inside
-//! an album we resolve them to a temporary file URL via `getFile` and pass
-//! that URL to `InputMediaVideo`. Telegram re-fetches it from its own CDN
-//! as if it were a fresh upload.
+//! an album we download the bytes via `getFile` + `Download::download_file`
+//! and re-upload them as a fresh multipart `InputMedia::Video`. Telegram
+//! converts the silent MP4 into a normal video on its side and accepts it.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use teloxide::net::Download;
 use teloxide::prelude::*;
 use teloxide::types::{
     FileId, InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
@@ -98,19 +99,24 @@ async fn resolve_item(bot: &Bot, item: PendingMedia) -> Result<InputMedia> {
         }
         PendingMedia::Animation(id) => {
             // Animation file_ids are type-bound and not reusable as a video.
-            // getFile returns a file path; combined with the bot token it
-            // yields a temporary URL Telegram is willing to re-ingest as
-            // a video in sendMediaGroup. The URL is valid for at least an
-            // hour, more than enough for the immediate send below.
-            let file = bot.get_file(FileId(id.clone())).await?;
-            let url_str = format!(
-                "https://api.telegram.org/file/bot{}/{}",
-                bot.token(),
-                file.path
-            );
-            let url = url::Url::parse(&url_str)
-                .map_err(|e| anyhow::anyhow!("invalid file URL for animation {id}: {e}"))?;
-            InputMedia::Video(InputMediaVideo::new(InputFile::url(url)))
+            // We also can't pass the api.telegram.org/file/bot<TOKEN>/<path>
+            // URL to sendMediaGroup — Telegram's server-side fetcher hits
+            // WEBPAGE_CURL_FAILED because that URL is only accessible to
+            // clients carrying the bot token, not to the public CDN puller.
+            //
+            // So: pull the bytes ourselves and re-upload as a fresh
+            // multipart attachment. Telegram converts it to a regular
+            // MP4 video on its side, which sendMediaGroup happily accepts.
+            let file = bot
+                .get_file(FileId(id.clone()))
+                .await
+                .with_context(|| format!("getFile failed for animation {id}"))?;
+            let mut buf: Vec<u8> = Vec::with_capacity(file.size as usize);
+            bot.download_file(&file.path, &mut buf)
+                .await
+                .with_context(|| format!("download failed for animation {id}"))?;
+            let upload = InputFile::memory(buf).file_name("animation.mp4");
+            InputMedia::Video(InputMediaVideo::new(upload))
         }
     })
 }
