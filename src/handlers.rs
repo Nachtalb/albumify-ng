@@ -111,21 +111,7 @@ async fn create(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer
     let group_count = groups.len();
 
     for (i, group) in groups.into_iter().enumerate() {
-        // Resolve animation file_ids to URLs (animations can't be referenced
-        // as InputMediaVideo by file_id). Done per-group so a failure on one
-        // group can still report a sensible index to the user.
-        let resolved = match resolve_group(bot, group).await {
-            Ok(g) => g,
-            Err(err) => {
-                tracing::warn!(?err, group_index = i, "failed to resolve media group");
-                bot.send_message(
-                    msg.chat.id,
-                    format!("Failed to prepare album {}/{group_count}: {err}", i + 1),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
+        let resolved = resolve_group(group);
         if let Err(err) = bot.send_media_group(msg.chat.id, resolved).await {
             tracing::warn!(?err, group_index = i, "send_media_group failed");
             bot.send_message(
