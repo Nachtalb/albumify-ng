@@ -16,15 +16,14 @@ Built in Rust with [teloxide](https://github.com/teloxide/teloxide).
 
 Telegram limits what can share an album:
 
-- **Photos + videos** can share one album.
+- **Photos, videos, and animations** can all share one album.
 - **Documents** must be in their own album, with only other documents.
-- **Animations (GIFs)** must be in their own album, with only other animations.
 - Each album holds at most **10 items**.
 
 Albumify NG preserves your insertion order and starts a new album whenever the
 next item cannot legally join the current one. So `photo, photo, doc, doc,
-video, animation` becomes four albums:
-`(photo, photo)(doc, doc)(video)(animation)`.
+video, animation` becomes three albums:
+`(photo, photo)(doc, doc)(video, animation)`.
 
 ### Commands
 

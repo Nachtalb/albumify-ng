@@ -44,8 +44,8 @@ pub async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
             "Albumify NG\n\n\
              Forward photos, videos, documents and GIFs, then send /create to \
              receive them back as one or more native Telegram albums.\n\n\
-             • Photos and videos share an album.\n\
-             • Documents and animations get their own albums.\n\
+             • Photos, videos and animations share an album.\n\
+             • Documents get their own albums.\n\
              • Order is preserved.\n\n\
              /help for the full command list.",
         )

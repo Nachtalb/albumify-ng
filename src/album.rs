@@ -13,18 +13,21 @@ use teloxide::types::{
 use crate::state::PendingMedia;
 
 /// Compatibility category for grouping.
+///
+/// Documents must be alone with other documents. Everything else — photos,
+/// videos, animations — can share a single album.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    PhotoOrVideo,
+    Visual,
     Document,
-    Animation,
 }
 
 fn classify(item: &PendingMedia) -> Kind {
     match item {
-        PendingMedia::Photo(_) | PendingMedia::Video(_) => Kind::PhotoOrVideo,
         PendingMedia::Document(_) => Kind::Document,
-        PendingMedia::Animation(_) => Kind::Animation,
+        PendingMedia::Photo(_) | PendingMedia::Video(_) | PendingMedia::Animation(_) => {
+            Kind::Visual
+        }
     }
 }
 
@@ -97,10 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn example_from_spec_splits_into_three_groups() {
+    fn example_from_spec_splits_around_documents() {
         // image, image, document, document, video, animation
-        //   -> (image, image)(document, document)(video)(animation)
-        // Note: video and animation are NOT mixable, so they split.
+        //   -> (image, image)(document, document)(video, animation)
+        // Only documents are exclusive; photo/video/animation all share.
         let input = vec![
             PendingMedia::Photo("p1".into()),
             PendingMedia::Photo("p2".into()),
@@ -116,22 +119,22 @@ mod tests {
             vec![
                 vec!["photo", "photo"],
                 vec!["doc", "doc"],
-                vec!["video"],
-                vec!["anim"],
+                vec!["video", "anim"],
             ]
         );
     }
 
     #[test]
-    fn photo_and_video_share_a_group() {
+    fn photo_video_and_animation_share_one_group() {
         let input = vec![
             PendingMedia::Photo("p1".into()),
             PendingMedia::Video("v1".into()),
+            PendingMedia::Animation("a1".into()),
             PendingMedia::Photo("p2".into()),
         ];
         let groups = build_groups(input);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 3);
+        assert_eq!(groups[0].len(), 4);
     }
 
     #[test]
