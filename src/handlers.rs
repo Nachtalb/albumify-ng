@@ -47,7 +47,7 @@ async fn start(bot: &Bot, msg: &Message, store: &MediaStore, ack: &AckDebouncer)
         bot.send_message(
             msg.chat.id,
             format!(
-                "Send me photos, videos, documents or GIFs.{extra}\n\n\
+                "Send me photos, videos, documents or audio.{extra}\n\n\
                  When you're done, send /create.\n\
                  /status to peek at the queue, /cancel to throw it all out."
             ),
@@ -176,17 +176,19 @@ pub async fn handle_media(
                 .await;
             true
         }
-        // Animations (GIFs / silent MP4s) arrive as their own MediaKind and
-        // also populate the document field. Match Animation first so they
-        // don't fall through to the Document arm.
-        MediaKind::Animation(a) => {
-            store
-                .push(
-                    user_id,
-                    PendingMedia::Animation(a.animation.file.id.0.clone()),
-                )
-                .await;
-            true
+        // Animations (GIFs) populate both MediaKind::Animation and
+        // MediaKind::Document. Match Animation first to refuse them
+        // explicitly — sendMediaGroup won't accept an animation file_id
+        // under any InputMedia* variant when reusing the original id.
+        MediaKind::Animation(_) => {
+            bot.send_message(
+                msg.chat.id,
+                "Animations (GIFs) aren't supported — Telegram won't accept \
+                 their file_id inside a media group. Send the same file as a \
+                 video or document instead.",
+            )
+            .await?;
+            false
         }
         MediaKind::Document(d) => {
             store
@@ -194,6 +196,12 @@ pub async fn handle_media(
                     user_id,
                     PendingMedia::Document(d.document.file.id.0.clone()),
                 )
+                .await;
+            true
+        }
+        MediaKind::Audio(a) => {
+            store
+                .push(user_id, PendingMedia::Audio(a.audio.file.id.0.clone()))
                 .await;
             true
         }

@@ -11,7 +11,7 @@ use teloxide::utils::command::BotCommands;
 #[derive(BotCommands, Clone, Debug, PartialEq, Eq)]
 #[command(
     rename_rule = "lowercase",
-    description = "Albumify NG bundles forwarded media into albums.\n\nSend me photos, videos, documents or GIFs, then use /create.\n\nCommands:"
+    description = "Albumify NG bundles forwarded media into albums.\n\nSend me photos, videos, documents or audio, then use /create.\n\nCommands:"
 )]
 pub enum Command {
     #[command(description = "show this help text.")]
@@ -42,10 +42,12 @@ pub async fn publish_bot_metadata(bot: &Bot) -> Result<()> {
     bot.set_my_description()
         .description(
             "Albumify NG\n\n\
-             Forward photos, videos, documents and GIFs, then send /create to \
+             Forward photos, videos, documents and audio, then send /create to \
              receive them back as one or more native Telegram albums.\n\n\
-             • Photos, videos and animations share an album.\n\
+             • Photos and videos share an album.\n\
              • Documents get their own albums.\n\
+             • Audio gets its own albums.\n\
+             • Animations (GIFs) aren't supported.\n\
              • Order is preserved.\n\n\
              /help for the full command list.",
         )

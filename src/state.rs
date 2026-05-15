@@ -15,12 +15,16 @@ use tokio::sync::Mutex;
 ///
 /// We only persist the `file_id`. Telegram resolves it server-side when we
 /// re-send via `InputMedia*`, so there is no need to download anything.
+///
+/// Animations (GIFs) are deliberately not supported — `sendMediaGroup` won't
+/// accept an animation file_id under any `InputMedia*` variant, and we don't
+/// want to download+reupload, so the bot rejects them at intake.
 #[derive(Debug, Clone)]
 pub enum PendingMedia {
     Photo(String),
     Video(String),
     Document(String),
-    Animation(String),
+    Audio(String),
 }
 
 /// Thread-safe per-user buffer of pending media items.
@@ -100,12 +104,8 @@ mod tests {
     #[tokio::test]
     async fn clear_reports_count() {
         let store = MediaStore::new();
-        store
-            .push(uid(7), PendingMedia::Animation("a1".into()))
-            .await;
-        store
-            .push(uid(7), PendingMedia::Animation("a2".into()))
-            .await;
+        store.push(uid(7), PendingMedia::Audio("a1".into())).await;
+        store.push(uid(7), PendingMedia::Audio("a2".into())).await;
 
         assert_eq!(store.clear(uid(7)).await, 2);
         assert_eq!(store.clear(uid(7)).await, 0);

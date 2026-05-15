@@ -8,7 +8,7 @@ Built in Rust with [teloxide](https://github.com/teloxide/teloxide).
 ## How it works
 
 1. Send `/start` in a private chat with the bot.
-2. Forward or send any number of photos, videos, documents, or animations.
+2. Forward or send any number of photos, videos, documents, or audio.
 3. Send `/create`. The bot bundles everything in order and sends it back as
    one or more native media groups.
 
@@ -16,14 +16,19 @@ Built in Rust with [teloxide](https://github.com/teloxide/teloxide).
 
 Telegram limits what can share an album:
 
-- **Photos, videos, and animations** can all share one album.
+- **Photos and videos** can share one album.
 - **Documents** must be in their own album, with only other documents.
+- **Audio** must be in its own album, with only other audio.
 - Each album holds at most **10 items**.
+
+Animations (GIFs) aren't supported — Telegram won't accept an animation
+`file_id` inside `sendMediaGroup` under any input variant, and Albumify NG
+never downloads bytes. The bot tells the user as much when they try.
 
 Albumify NG preserves your insertion order and starts a new album whenever the
 next item cannot legally join the current one. So `photo, photo, doc, doc,
-video, animation` becomes three albums:
-`(photo, photo)(doc, doc)(video, animation)`.
+video, audio` becomes four albums:
+`(photo, photo)(doc, doc)(video)(audio)`.
 
 ### Commands
 

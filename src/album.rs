@@ -1,48 +1,44 @@
 //! Group a flat list of pending media into Telegram-compatible albums.
 //!
-//! Telegram's `sendMediaGroup` accepts photos, videos and documents (plus
-//! audio / livephoto, which we don't queue). Documents must travel alone
-//! with other documents; photos and videos can share a single album. We
-//! preserve the user's insertion order and start a new group whenever the
+//! Telegram's `sendMediaGroup` is fussy about mixing kinds:
+//! - photos and videos may share one album
+//! - documents must be alone (only with other documents)
+//! - audio must be alone (only with other audio)
+//!
+//! We preserve the user's insertion order and start a new group whenever the
 //! next item cannot legally join the current one, and we cap each group at
 //! Telegram's 10-item limit.
 //!
-//! Animations don't have their own `InputMedia*` variant accepted by
-//! `sendMediaGroup` (the API only takes audio/document/photo/video/livephoto),
-//! so we re-package their `file_id` as an `InputMediaVideo` — they're stored
-//! as MP4s server-side, the file_id resolves the same way.
+//! Animations (GIFs) aren't supported by `sendMediaGroup` under any
+//! `InputMedia*` variant when reusing the original file_id, so the bot
+//! refuses them at intake (see handlers.rs).
 
 use teloxide::types::{
-    InputFile, InputMedia, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
+    InputFile, InputMedia, InputMediaAudio, InputMediaDocument, InputMediaPhoto, InputMediaVideo,
 };
 
 use crate::state::PendingMedia;
 
-/// Compatibility category for grouping.
-///
-/// Documents must be alone with other documents. Everything else — photos,
-/// videos, animations — can share a single album.
+/// Compatibility category for grouping. Each category is a closed island —
+/// items only share an album with siblings of the same kind, except photos
+/// and videos which both live in `Visual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Visual,
     Document,
+    Audio,
 }
 
 fn classify(item: &PendingMedia) -> Kind {
     match item {
+        PendingMedia::Photo(_) | PendingMedia::Video(_) => Kind::Visual,
         PendingMedia::Document(_) => Kind::Document,
-        PendingMedia::Photo(_) | PendingMedia::Video(_) | PendingMedia::Animation(_) => {
-            Kind::Visual
-        }
+        PendingMedia::Audio(_) => Kind::Audio,
     }
 }
 
 /// Pure planner: split a flat buffer into Telegram-compatible groups, capped
 /// at 10 items per group.
-///
-/// Returns the items themselves (not `InputMedia`) so the planner stays sync
-/// and unit-testable. The async conversion to `InputMedia` happens in
-/// [`resolve_group`].
 pub fn plan_groups(items: Vec<PendingMedia>) -> Vec<Vec<PendingMedia>> {
     const MAX_GROUP: usize = 10;
     let mut groups: Vec<Vec<PendingMedia>> = Vec::new();
@@ -67,9 +63,7 @@ pub fn plan_groups(items: Vec<PendingMedia>) -> Vec<Vec<PendingMedia>> {
 }
 
 /// Convert one planned group into the `Vec<InputMedia>` that `sendMediaGroup`
-/// expects. Every variant reuses the original `file_id`; animations are
-/// re-tagged as `InputMediaVideo` because `sendMediaGroup` has no animation
-/// variant.
+/// expects. Every variant reuses the original `file_id` — no downloads.
 pub fn resolve_group(items: Vec<PendingMedia>) -> Vec<InputMedia> {
     items.into_iter().map(resolve_item).collect()
 }
@@ -85,11 +79,8 @@ fn resolve_item(item: PendingMedia) -> InputMedia {
         PendingMedia::Document(id) => {
             InputMedia::Document(InputMediaDocument::new(InputFile::file_id(id.into())))
         }
-        PendingMedia::Animation(id) => {
-            // Animations are MP4s under the hood. Reuse the file_id as a
-            // video — sendMediaGroup accepts it and Telegram renders the
-            // result identically (silent video).
-            InputMedia::Video(InputMediaVideo::new(InputFile::file_id(id.into())))
+        PendingMedia::Audio(id) => {
+            InputMedia::Audio(InputMediaAudio::new(InputFile::file_id(id.into())))
         }
     }
 }
@@ -107,7 +98,7 @@ mod tests {
                         PendingMedia::Photo(_) => "photo",
                         PendingMedia::Video(_) => "video",
                         PendingMedia::Document(_) => "doc",
-                        PendingMedia::Animation(_) => "anim",
+                        PendingMedia::Audio(_) => "audio",
                     })
                     .collect()
             })
@@ -115,43 +106,48 @@ mod tests {
     }
 
     #[test]
-    fn example_from_spec_splits_around_documents() {
-        // image, image, document, document, video, animation
-        //   -> (image, image)(document, document)(video, animation)
-        // Only documents are exclusive; photo/video/animation all share
-        // at the planning layer (animation is resolved to a video URL at
-        // send time, see resolve_item).
+    fn photos_and_videos_share_one_group() {
+        let input = vec![
+            PendingMedia::Photo("p1".into()),
+            PendingMedia::Video("v1".into()),
+            PendingMedia::Photo("p2".into()),
+        ];
+        let groups = plan_groups(input);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 3);
+    }
+
+    #[test]
+    fn documents_split_from_visuals() {
+        // photo, photo, doc, doc, video -> (p, p)(d, d)(v)
         let input = vec![
             PendingMedia::Photo("p1".into()),
             PendingMedia::Photo("p2".into()),
             PendingMedia::Document("d1".into()),
             PendingMedia::Document("d2".into()),
             PendingMedia::Video("v1".into()),
-            PendingMedia::Animation("a1".into()),
         ];
-
         let groups = plan_groups(input);
         assert_eq!(
             kinds(&groups),
-            vec![
-                vec!["photo", "photo"],
-                vec!["doc", "doc"],
-                vec!["video", "anim"],
-            ]
+            vec![vec!["photo", "photo"], vec!["doc", "doc"], vec!["video"],]
         );
     }
 
     #[test]
-    fn photo_video_and_animation_share_one_group() {
+    fn audio_is_its_own_island() {
+        // audio, audio, photo, audio -> (a, a)(p)(a)
         let input = vec![
+            PendingMedia::Audio("a1".into()),
+            PendingMedia::Audio("a2".into()),
             PendingMedia::Photo("p1".into()),
-            PendingMedia::Video("v1".into()),
-            PendingMedia::Animation("a1".into()),
-            PendingMedia::Photo("p2".into()),
+            PendingMedia::Audio("a3".into()),
         ];
         let groups = plan_groups(input);
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].len(), 4);
+        assert_eq!(
+            kinds(&groups),
+            vec![vec!["audio", "audio"], vec!["photo"], vec!["audio"]]
+        );
     }
 
     #[test]
