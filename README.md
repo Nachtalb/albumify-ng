@@ -21,9 +21,7 @@ Telegram limits what can share an album:
 - **Audio** must be in its own album, with only other audio.
 - Each album holds at most **10 items**.
 
-Animations (GIFs) aren't supported — Telegram won't accept an animation
-`file_id` inside `sendMediaGroup` under any input variant, and Albumify NG
-never downloads bytes. The bot tells the user as much when they try.
+Animations (GIFs) aren't supported.
 
 Albumify NG preserves your insertion order and starts a new album whenever the
 next item cannot legally join the current one. So `photo, photo, doc, doc,

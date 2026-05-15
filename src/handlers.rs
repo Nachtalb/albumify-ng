@@ -176,16 +176,10 @@ pub async fn handle_media(
                 .await;
             true
         }
-        // Animations (GIFs) populate both MediaKind::Animation and
-        // MediaKind::Document. Match Animation first to refuse them
-        // explicitly — sendMediaGroup won't accept an animation file_id
-        // under any InputMedia* variant when reusing the original id.
         MediaKind::Animation(_) => {
             bot.send_message(
                 msg.chat.id,
-                "Animations (GIFs) aren't supported — Telegram won't accept \
-                 their file_id inside a media group. Send the same file as a \
-                 video or document instead.",
+                "Animations (GIFs) aren't supported. Send the file as a video or document instead.",
             )
             .await?;
             false
